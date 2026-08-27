@@ -1,7 +1,8 @@
 """Hot tokenizer, matcher, and vector loops exposed through a C ABI."""
 
-from std.algorithm import parallelize
 from std.math import sqrt
+from std.runtime import initialize_runtime
+from std.runtime.asyncrt import TaskGroup
 from std.sys import simd_width_of
 
 comptime U32Ptr = UnsafePointer[UInt32, AnyOrigin[mut=True]]
@@ -10,6 +11,13 @@ comptime I64Ptr = UnsafePointer[Int64, AnyOrigin[mut=True]]
 comptime U64Ptr = UnsafePointer[UInt64, AnyOrigin[mut=True]]
 comptime F32Ptr = UnsafePointer[Float32, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.float32]()
+
+
+@fieldwise_init
+struct CosineSums(ImplicitlyCopyable):
+    var aa: Float32
+    var bb: Float32
+    var ab: Float32
 
 
 def u32p(addr: Int) -> U32Ptr:
@@ -333,7 +341,7 @@ def dot_f32(a: F32Ptr, b: F32Ptr, n: Int) -> Float32:
     return result
 
 
-def cosine_f32(a: F32Ptr, b: F32Ptr, begin: Int, end: Int) -> SIMD[DType.float32, 3]:
+def cosine_f32(a: F32Ptr, b: F32Ptr, begin: Int, end: Int) -> CosineSums:
     var acc_aa = SIMD[DType.float32, W](0.0)
     var acc_bb = SIMD[DType.float32, W](0.0)
     var acc_ab = SIMD[DType.float32, W](0.0)
@@ -345,15 +353,15 @@ def cosine_f32(a: F32Ptr, b: F32Ptr, begin: Int, end: Int) -> SIMD[DType.float32
         acc_bb += bv * bv
         acc_ab += av * bv
         i += W
-    var result = SIMD[DType.float32, 3](
+    var result = CosineSums(
         acc_aa.reduce_add(), acc_bb.reduce_add(), acc_ab.reduce_add()
     )
     while i < end:
         var av = a[i]
         var bv = b[i]
-        result[0] += av * av
-        result[1] += bv * bv
-        result[2] += av * bv
+        result.aa += av * av
+        result.bb += bv * bv
+        result.ab += av * bv
         i += 1
     return result
 
@@ -363,9 +371,9 @@ def msp_cosine(a_addr: Int, b_addr: Int, n: Int) abi("C") -> Float64:
     var a = f32p(a_addr)
     var b = f32p(b_addr)
     var sums = cosine_f32(a, b, 0, n)
-    if sums[0] == 0.0 or sums[1] == 0.0:
+    if sums.aa == 0.0 or sums.bb == 0.0:
         return 0.0
-    return Float64(sums[2] / sqrt(sums[0] * sums[1]))
+    return Float64(sums.ab / sqrt(sums.aa * sums.bb))
 
 
 @export("msp_cosine_parallel")
@@ -376,31 +384,35 @@ def msp_cosine_parallel(
     scratch_addr: Int,
     workers: Int,
 ) abi("C") -> Float64:
+    initialize_runtime()
     var a = f32p(a_addr)
     var b = f32p(b_addr)
     var scratch = f32p(scratch_addr)
     var chunk_size = (n + workers - 1) // workers
 
-    @parameter
-    def reduce_chunk(chunk: Int):
+    @__parameter
+    async def reduce_chunk(chunk: Int):
         var begin = chunk * chunk_size
         var end = min(begin + chunk_size, n)
         var sums = cosine_f32(a, b, begin, end)
         var scratch_offset = chunk * 16
-        scratch[scratch_offset] = sums[0]
-        scratch[scratch_offset + 1] = sums[1]
-        scratch[scratch_offset + 2] = sums[2]
+        scratch[scratch_offset] = sums.aa
+        scratch[scratch_offset + 1] = sums.bb
+        scratch[scratch_offset + 2] = sums.ab
 
-    parallelize[reduce_chunk](workers, workers)
-    var sums = SIMD[DType.float32, 3](0.0)
+    var tasks = TaskGroup()
+    for chunk in range(workers):
+        tasks.create_task(reduce_chunk(chunk))
+    tasks.wait()
+    var sums = CosineSums(0.0, 0.0, 0.0)
     for chunk in range(workers):
         var scratch_offset = chunk * 16
-        sums[0] += scratch[scratch_offset]
-        sums[1] += scratch[scratch_offset + 1]
-        sums[2] += scratch[scratch_offset + 2]
-    if sums[0] == 0.0 or sums[1] == 0.0:
+        sums.aa += scratch[scratch_offset]
+        sums.bb += scratch[scratch_offset + 1]
+        sums.ab += scratch[scratch_offset + 2]
+    if sums.aa == 0.0 or sums.bb == 0.0:
         return 0.0
-    return Float64(sums[2] / sqrt(sums[0] * sums[1]))
+    return Float64(sums.ab / sqrt(sums.aa * sums.bb))
 
 
 @export("msp_normalize")

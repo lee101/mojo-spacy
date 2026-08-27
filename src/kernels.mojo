@@ -20,6 +20,12 @@ struct CosineSums(ImplicitlyCopyable):
     var ab: Float32
 
 
+@fieldwise_init
+struct DotNorm(ImplicitlyCopyable):
+    var dot: Float32
+    var norm2: Float32
+
+
 def u32p(addr: Int) -> U32Ptr:
     return U32Ptr(unsafe_from_address=addr)
 
@@ -341,6 +347,26 @@ def dot_f32(a: F32Ptr, b: F32Ptr, n: Int) -> Float32:
     return result
 
 
+def dot_norm_f32(a: F32Ptr, b: F32Ptr, n: Int) -> DotNorm:
+    var acc_dot = SIMD[DType.float32, W](0.0)
+    var acc_norm = SIMD[DType.float32, W](0.0)
+    var i = 0
+    while i + W <= n:
+        var av = a.load[width=W](i)
+        var bv = b.load[width=W](i)
+        acc_dot += av * bv
+        acc_norm += bv * bv
+        i += W
+    var result = DotNorm(acc_dot.reduce_add(), acc_norm.reduce_add())
+    while i < n:
+        var av = a[i]
+        var bv = b[i]
+        result.dot += av * bv
+        result.norm2 += bv * bv
+        i += 1
+    return result
+
+
 def cosine_f32(a: F32Ptr, b: F32Ptr, begin: Int, end: Int) -> CosineSums:
     var acc_aa = SIMD[DType.float32, W](0.0)
     var acc_bb = SIMD[DType.float32, W](0.0)
@@ -434,6 +460,46 @@ def msp_normalize(data_addr: Int, rows: Int, dims: Int) abi("C"):
             i += 1
 
 
+def most_similar_query(
+    data: F32Ptr,
+    rows: I64Ptr,
+    row_count: Int,
+    queries: F32Ptr,
+    q: Int,
+    dims: Int,
+    nbest: Int,
+    best_rows: I64Ptr,
+    scores: F32Ptr,
+):
+    for k in range(nbest):
+        best_rows[q * nbest + k] = -1
+        scores[q * nbest + k] = -2.0
+    var query = queries + q * dims
+    var qnorm2 = dot_f32(query, query, dims)
+    if qnorm2 == 0.0:
+        return
+    for ri in range(row_count):
+        var row = Int(rows[ri])
+        var candidate = data + row * dims
+        var sums = dot_norm_f32(query, candidate, dims)
+        var score = Float32(0.0)
+        if sums.norm2 != 0.0:
+            score = sums.dot / sqrt(qnorm2 * sums.norm2)
+        var insert_at = nbest
+        for k in range(nbest):
+            if score > scores[q * nbest + k]:
+                insert_at = k
+                break
+        if insert_at < nbest:
+            var k = nbest - 1
+            while k > insert_at:
+                scores[q * nbest + k] = scores[q * nbest + k - 1]
+                best_rows[q * nbest + k] = best_rows[q * nbest + k - 1]
+                k -= 1
+            scores[q * nbest + insert_at] = score
+            best_rows[q * nbest + insert_at] = Int64(row)
+
+
 @export("msp_most_similar")
 def msp_most_similar(
     data_addr: Int,
@@ -452,30 +518,42 @@ def msp_most_similar(
     var best_rows = i64p(best_rows_addr)
     var scores = f32p(scores_addr)
     for q in range(query_count):
-        for k in range(nbest):
-            best_rows[q * nbest + k] = -1
-            scores[q * nbest + k] = -2.0
-        var query = queries + q * dims
-        var qnorm2 = dot_f32(query, query, dims)
-        if qnorm2 == 0.0:
-            continue
-        for ri in range(row_count):
-            var row = Int(rows[ri])
-            var candidate = data + row * dims
-            var rnorm2 = dot_f32(candidate, candidate, dims)
-            var score = Float32(0.0)
-            if rnorm2 != 0.0:
-                score = dot_f32(query, candidate, dims) / sqrt(qnorm2 * rnorm2)
-            var insert_at = nbest
-            for k in range(nbest):
-                if score > scores[q * nbest + k]:
-                    insert_at = k
-                    break
-            if insert_at < nbest:
-                var k = nbest - 1
-                while k > insert_at:
-                    scores[q * nbest + k] = scores[q * nbest + k - 1]
-                    best_rows[q * nbest + k] = best_rows[q * nbest + k - 1]
-                    k -= 1
-                scores[q * nbest + insert_at] = score
-                best_rows[q * nbest + insert_at] = Int64(row)
+        most_similar_query(
+            data, rows, row_count, queries, q, dims, nbest, best_rows, scores
+        )
+
+
+@export("msp_most_similar_parallel")
+def msp_most_similar_parallel(
+    data_addr: Int,
+    rows_addr: Int,
+    row_count: Int,
+    queries_addr: Int,
+    query_count: Int,
+    dims: Int,
+    nbest: Int,
+    best_rows_addr: Int,
+    scores_addr: Int,
+    workers: Int,
+) abi("C"):
+    initialize_runtime()
+    var data = f32p(data_addr)
+    var rows = i64p(rows_addr)
+    var queries = f32p(queries_addr)
+    var best_rows = i64p(best_rows_addr)
+    var scores = f32p(scores_addr)
+    var chunk_size = (query_count + workers - 1) // workers
+
+    @__parameter
+    async def search_chunk(chunk: Int):
+        var begin = chunk * chunk_size
+        var end = min(begin + chunk_size, query_count)
+        for q in range(begin, end):
+            most_similar_query(
+                data, rows, row_count, queries, q, dims, nbest, best_rows, scores
+            )
+
+    var tasks = TaskGroup()
+    for chunk in range(workers):
+        tasks.create_task(search_chunk(chunk))
+    tasks.wait()

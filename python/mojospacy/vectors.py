@@ -9,6 +9,8 @@ from .strings import StringStore, hash_string
 
 _COSINE_PARALLEL_THRESHOLD = 8_000_000
 _COSINE_WORKERS = 4
+_MOST_SIMILAR_PARALLEL_THRESHOLD = 8_000_000
+_MOST_SIMILAR_WORKERS = 4
 
 
 def _f32(value) -> np.ndarray:
@@ -204,7 +206,7 @@ class Vectors:
             return empty_keys, empty_keys.astype(np.int32), empty_keys.astype(np.float32)
         best_rows64 = np.empty((len(query_matrix), n), dtype=np.int64)
         scores = np.empty((len(query_matrix), n), dtype=np.float32)
-        lib().msp_most_similar(
+        arguments = (
             addr(self.data),
             addr(valid_rows),
             len(valid_rows),
@@ -215,6 +217,12 @@ class Vectors:
             addr(best_rows64),
             addr(scores),
         )
+        work = len(valid_rows) * len(query_matrix) * self.data.shape[1]
+        if work >= _MOST_SIMILAR_PARALLEL_THRESHOLD and len(query_matrix) > 1:
+            workers = min(_MOST_SIMILAR_WORKERS, len(query_matrix))
+            lib().msp_most_similar_parallel(*arguments, workers)
+        else:
+            lib().msp_most_similar(*arguments)
         if not sort:
             pass
         inverse = {}

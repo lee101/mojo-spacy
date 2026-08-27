@@ -76,19 +76,25 @@ Intel(R) Xeon(R) CPU E5-2697 v4 @ 2.30GHz, Linux 6.8.0-136-generic, Python
 
 | case | mojo-spacy | reference | ratio | result |
 | --- | ---: | ---: | ---: | --- |
-| Tokenizer (1.2M chars) | 768.34 ms | 2211.63 ms (spaCy) | 2.88x | faster |
-| Matcher (64k tokens, 3 rules) | 100.11 ms | 234.88 ms (spaCy) | 2.35x | faster |
-| Cosine similarity (4M dims) | 6.39 ms | 16.77 ms (NumPy) | 2.63x | faster |
-| Normalize (100k x 64) | 15.79 ms | 33.52 ms (NumPy) | 2.12x | faster |
-| Vectors.most_similar (20k x 64, q=16) | 25.72 ms | 25.15 ms (spaCy) | 0.98x | slower |
+| Tokenizer (1.2M chars) | 419.48 ms | 1940.43 ms (spaCy) | 4.63x | faster |
+| Matcher (64k tokens, 3 rules) | 78.46 ms | 153.65 ms (spaCy) | 1.96x | faster |
+| Cosine similarity (4M dims) | 1.39 ms | 2.48 ms (NumPy) | 1.78x | faster |
+| Normalize (100k x 64) | 6.22 ms | 20.02 ms (NumPy) | 3.22x | faster |
+| Vectors.most_similar (20k x 64, q=16) | 7.22 ms | 15.83 ms (spaCy) | 2.19x | faster |
 
 Matcher calls lazily cache the contiguous ten-column lexical attribute matrix
 on each `Doc`, avoiding repeated Python property evaluation and allocation.
 Cosine computes both squared norms and the cross product in one SIMD pass,
 uses a scalar remainder loop, and switches to a four-way CPU reduction only
 for vectors of at least eight million elements.
+`Vectors.most_similar` fuses each candidate's norm and query dot product into
+one SIMD pass with a scalar remainder, and splits independent query batches
+across four CPU workers only when at least eight million elements will be
+examined.
 
-No GPU path is included; GPU performance was not measured by this benchmark.
+No GPU path is included. The available hot loops are branch-heavy or stream
+vector memory at less than two arithmetic operations per byte, so they do not
+have enough arithmetic intensity to justify device transfer and launch costs.
 
 ## How it works
 

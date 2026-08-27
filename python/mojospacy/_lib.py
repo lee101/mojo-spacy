@@ -23,6 +23,7 @@ _SIGNATURES = {
     "msp_cosine_parallel": ([I, I, I, I, I], F),
     "msp_normalize": ([I, I, I], None),
     "msp_most_similar": ([I] * 9, None),
+    "msp_most_similar_parallel": ([I] * 10, None),
 }
 
 

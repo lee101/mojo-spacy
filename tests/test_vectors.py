@@ -82,6 +82,30 @@ def test_most_similar_matches_spacy():
     assert np.allclose(ours_result[2], theirs_result[2], atol=2e-4)
 
 
+@pytest.mark.parametrize("dims", [7, 8, 9, 31, 33])
+def test_most_similar_simd_tails(dims):
+    rng = np.random.default_rng(dims)
+    data = rng.normal(size=(19, dims)).astype(np.float32)
+    queries = rng.normal(size=(3, dims)).astype(np.float32)
+    keys = [f"key-{row}" for row in range(len(data))]
+    ours = mojospacy.Vectors(data=data, keys=keys).most_similar(queries, n=4)
+    theirs = spacy_vectors.Vectors(data=data.copy(), keys=keys).most_similar(queries, n=4)
+    assert np.array_equal(ours[1], theirs[1])
+    assert np.allclose(ours[2], theirs[2], atol=2e-4)
+
+
+def test_most_similar_parallel_threshold(monkeypatch):
+    monkeypatch.setattr(vector_module, "_MOST_SIMILAR_PARALLEL_THRESHOLD", 1)
+    rng = np.random.default_rng(18)
+    data = rng.normal(size=(41, 9)).astype(np.float32)
+    queries = rng.normal(size=(5, 9)).astype(np.float32)
+    keys = [f"key-{row}" for row in range(len(data))]
+    ours = mojospacy.Vectors(data=data, keys=keys).most_similar(queries, n=5)
+    theirs = spacy_vectors.Vectors(data=data.copy(), keys=keys).most_similar(queries, n=5)
+    assert np.array_equal(ours[1], theirs[1])
+    assert np.allclose(ours[2], theirs[2], atol=2e-4)
+
+
 def test_most_similar_validates_n_and_handles_empty_query_batch():
     vectors = populated(mojospacy.Vectors)
     with pytest.raises(ValueError, match="at least 1"):

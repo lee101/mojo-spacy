@@ -84,17 +84,25 @@ Intel(R) Xeon(R) CPU E5-2697 v4 @ 2.30GHz, Linux 6.8.0-136-generic, Python
 
 Matcher calls lazily cache the contiguous ten-column lexical attribute matrix
 on each `Doc`, avoiding repeated Python property evaluation and allocation.
-Cosine computes both squared norms and the cross product in one SIMD pass,
-uses a scalar remainder loop, and switches to a four-way CPU reduction only
-for vectors of at least eight million elements.
+Cosine computes both squared norms and the cross product in one SIMD pass with
+a scalar remainder. That pass reads eight bytes per element and runs six flops,
+so it is under one flop per byte and always stays serial; the former four-way
+CPU reduction and its scratch buffer are gone.
 `Vectors.most_similar` fuses each candidate's norm and query dot product into
-one SIMD pass with a scalar remainder, and splits independent query batches
-across four CPU workers only when at least eight million elements will be
-examined.
+one SIMD pass with a scalar remainder. Every query re-reads the whole row
+matrix, so once that matrix is cache resident the inner loop is compute bound.
+Mojo 1.2.0 removed `std.runtime.asyncrt`, so the fan-out moved to the Python
+shim: above eight million elements examined the query range is split into
+disjoint blocks and one `msp_most_similar_range` call per block is issued from a
+`ThreadPoolExecutor`. ctypes releases the GIL, so the calls run in parallel,
+and each query owns one output row, so the result is bit-identical to the
+serial kernel. Measured on this box the fan-out reaches 2.8x to 17x across
+20k-50k row tables with 96-300 dimensions.
 
-No GPU path is included. The available hot loops are branch-heavy or stream
-vector memory at less than two arithmetic operations per byte, so they do not
-have enough arithmetic intensity to justify device transfer and launch costs.
+No GPU path is included. The tokenizer and matcher loops are branch-heavy, and
+the one remaining elementwise pass streams vector memory at less than one
+arithmetic operation per byte, so neither justifies device transfer and launch
+costs.
 
 ## How it works
 

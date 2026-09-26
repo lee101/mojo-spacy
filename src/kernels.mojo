@@ -1,8 +1,6 @@
 """Hot tokenizer, matcher, and vector loops exposed through a C ABI."""
 
 from std.math import sqrt
-from std.runtime import initialize_runtime
-from std.runtime.asyncrt import TaskGroup
 from std.sys import simd_width_of
 
 comptime U32Ptr = UnsafePointer[UInt32, AnyOrigin[mut=True]]
@@ -402,44 +400,6 @@ def msp_cosine(a_addr: Int, b_addr: Int, n: Int) abi("C") -> Float64:
     return Float64(sums.ab / sqrt(sums.aa * sums.bb))
 
 
-@export("msp_cosine_parallel")
-def msp_cosine_parallel(
-    a_addr: Int,
-    b_addr: Int,
-    n: Int,
-    scratch_addr: Int,
-    workers: Int,
-) abi("C") -> Float64:
-    initialize_runtime()
-    var a = f32p(a_addr)
-    var b = f32p(b_addr)
-    var scratch = f32p(scratch_addr)
-    var chunk_size = (n + workers - 1) // workers
-
-    @__parameter
-    async def reduce_chunk(chunk: Int):
-        var begin = chunk * chunk_size
-        var end = min(begin + chunk_size, n)
-        var sums = cosine_f32(a, b, begin, end)
-        var scratch_offset = chunk * 16
-        scratch[scratch_offset] = sums.aa
-        scratch[scratch_offset + 1] = sums.bb
-        scratch[scratch_offset + 2] = sums.ab
-
-    var tasks = TaskGroup()
-    for chunk in range(workers):
-        tasks.create_task(reduce_chunk(chunk))
-    tasks.wait()
-    var sums = CosineSums(0.0, 0.0, 0.0)
-    for chunk in range(workers):
-        var scratch_offset = chunk * 16
-        sums.aa += scratch[scratch_offset]
-        sums.bb += scratch[scratch_offset + 1]
-        sums.ab += scratch[scratch_offset + 2]
-    if sums.aa == 0.0 or sums.bb == 0.0:
-        return 0.0
-    return Float64(sums.ab / sqrt(sums.aa * sums.bb))
-
 
 @export("msp_normalize")
 def msp_normalize(data_addr: Int, rows: Int, dims: Int) abi("C"):
@@ -523,37 +483,32 @@ def msp_most_similar(
         )
 
 
-@export("msp_most_similar_parallel")
-def msp_most_similar_parallel(
+@export("msp_most_similar_range")
+def msp_most_similar_range(
     data_addr: Int,
     rows_addr: Int,
     row_count: Int,
     queries_addr: Int,
-    query_count: Int,
+    query_start: Int,
+    query_stop: Int,
     dims: Int,
     nbest: Int,
     best_rows_addr: Int,
     scores_addr: Int,
-    workers: Int,
 ) abi("C"):
-    initialize_runtime()
+    """Answer the queries in ``[query_start, query_stop)``.
+
+    Each query owns one row of ``best_rows`` and ``scores``, so a caller can
+    split the query range into disjoint blocks and run this concurrently.
+    """
     var data = f32p(data_addr)
     var rows = i64p(rows_addr)
     var queries = f32p(queries_addr)
     var best_rows = i64p(best_rows_addr)
     var scores = f32p(scores_addr)
-    var chunk_size = (query_count + workers - 1) // workers
+    for q in range(query_start, query_stop):
+        most_similar_query(
+            data, rows, row_count, queries, q, dims, nbest, best_rows, scores
+        )
 
-    @__parameter
-    async def search_chunk(chunk: Int):
-        var begin = chunk * chunk_size
-        var end = min(begin + chunk_size, query_count)
-        for q in range(begin, end):
-            most_similar_query(
-                data, rows, row_count, queries, q, dims, nbest, best_rows, scores
-            )
 
-    var tasks = TaskGroup()
-    for chunk in range(workers):
-        tasks.create_task(search_chunk(chunk))
-    tasks.wait()

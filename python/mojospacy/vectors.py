@@ -4,13 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._lib import addr, lib
+from ._lib import addr, lib, most_similar
 from .strings import StringStore, hash_string
-
-_COSINE_PARALLEL_THRESHOLD = 8_000_000
-_COSINE_WORKERS = 4
-_MOST_SIMILAR_PARALLEL_THRESHOLD = 8_000_000
-_MOST_SIMILAR_WORKERS = 4
 
 
 def _f32(value) -> np.ndarray:
@@ -30,11 +25,6 @@ def cosine_similarity(vector1, vector2) -> float:
         raise ValueError(f"Shape mismatch: {first.shape} vs {second.shape}")
     if not first.size:
         return 0.0
-    if first.size >= _COSINE_PARALLEL_THRESHOLD:
-        scratch = np.empty(_COSINE_WORKERS * 16, dtype=np.float32)
-        return lib().msp_cosine_parallel(
-            addr(first), addr(second), first.size, addr(scratch), _COSINE_WORKERS
-        )
     return lib().msp_cosine(addr(first), addr(second), first.size)
 
 
@@ -206,23 +196,17 @@ class Vectors:
             return empty_keys, empty_keys.astype(np.int32), empty_keys.astype(np.float32)
         best_rows64 = np.empty((len(query_matrix), n), dtype=np.int64)
         scores = np.empty((len(query_matrix), n), dtype=np.float32)
-        arguments = (
-            addr(self.data),
-            addr(valid_rows),
+        most_similar(
+            self.data,
+            valid_rows,
             len(valid_rows),
-            addr(query_matrix),
+            query_matrix,
             len(query_matrix),
             self.data.shape[1],
             n,
-            addr(best_rows64),
-            addr(scores),
+            best_rows64,
+            scores,
         )
-        work = len(valid_rows) * len(query_matrix) * self.data.shape[1]
-        if work >= _MOST_SIMILAR_PARALLEL_THRESHOLD and len(query_matrix) > 1:
-            workers = min(_MOST_SIMILAR_WORKERS, len(query_matrix))
-            lib().msp_most_similar_parallel(*arguments, workers)
-        else:
-            lib().msp_most_similar(*arguments)
         if not sort:
             pass
         inverse = {}

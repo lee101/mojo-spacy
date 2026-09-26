@@ -6,6 +6,7 @@ import ctypes
 import os
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -20,11 +21,62 @@ _SIGNATURES = {
     "msp_tokenize": ([I, I, I, I, I], I),
     "msp_match": ([I] * 20, I),
     "msp_cosine": ([I, I, I], F),
-    "msp_cosine_parallel": ([I, I, I, I, I], F),
     "msp_normalize": ([I, I, I], None),
     "msp_most_similar": ([I] * 9, None),
-    "msp_most_similar_parallel": ([I] * 10, None),
+    "msp_most_similar_range": ([I] * 10, None),
 }
+
+# A cosine reduction is three multiply-adds per element for eight bytes of
+# input, under one flop per byte, so it stays serial. The nearest-neighbour
+# search is different: every query re-reads the whole row matrix, and once that
+# matrix is cache resident the dot-and-norm loop is compute bound. Mojo 1.2.0
+# removed std.runtime.asyncrt, so the fan-out lives here and calls the
+# range-taking export once per disjoint block of queries.
+MOST_SIMILAR_PARALLEL_THRESHOLD = 8_000_000
+MOST_SIMILAR_WORKERS = min(16, os.cpu_count() or 1)
+
+
+def most_similar(
+    data: np.ndarray,
+    rows: np.ndarray,
+    row_count: int,
+    queries: np.ndarray,
+    query_count: int,
+    dims: int,
+    nbest: int,
+    best_rows: np.ndarray,
+    scores: np.ndarray,
+) -> None:
+    """Fill ``best_rows`` and ``scores`` with the nearest neighbours per query."""
+    arguments = (
+        addr(data),
+        addr(rows),
+        row_count,
+        addr(queries),
+        query_count,
+        dims,
+        nbest,
+        addr(best_rows),
+        addr(scores),
+    )
+    if query_count < 2 or row_count * query_count * dims < MOST_SIMILAR_PARALLEL_THRESHOLD:
+        lib().msp_most_similar(*arguments)
+        return
+    workers = min(MOST_SIMILAR_WORKERS, query_count)
+    step = (query_count + workers - 1) // workers
+    blocks = [(lo, min(lo + step, query_count)) for lo in range(0, query_count, step)]
+    chunk = lib().msp_most_similar_range
+    data_addr, rows_addr, queries_addr = arguments[0], arguments[1], arguments[3]
+    best_addr, scores_addr = arguments[7], arguments[8]
+
+    def run(bounds: tuple[int, int]) -> None:
+        chunk(
+            data_addr, rows_addr, row_count, queries_addr, bounds[0], bounds[1],
+            dims, nbest, best_addr, scores_addr,
+        )
+
+    with ThreadPoolExecutor(max_workers=len(blocks)) as pool:
+        list(pool.map(run, blocks))
 
 
 class BuildError(RuntimeError):

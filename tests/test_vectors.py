@@ -45,16 +45,39 @@ def test_cosine_similarity_simd_tails(size):
     assert mojospacy.cosine_similarity(first, second) == pytest.approx(expected, abs=3e-7)
 
 
-def test_cosine_similarity_parallel_threshold(monkeypatch):
-    monkeypatch.setattr(vector_module, "_COSINE_PARALLEL_THRESHOLD", 256)
+def test_cosine_similarity_large_vector_stays_on_one_reduction():
+    """Cosine is under one flop per byte, so it has no threaded path to pick."""
     rng = np.random.default_rng(12)
-    first = rng.normal(size=259).astype(np.float32)
-    second = rng.normal(size=259).astype(np.float32)
+    first = rng.normal(size=1_000_003).astype(np.float32)
+    second = rng.normal(size=1_000_003).astype(np.float32)
     expected = float(
         np.dot(first, second)
         / np.sqrt(np.dot(first, first) * np.dot(second, second))
     )
-    assert mojospacy.cosine_similarity(first, second) == pytest.approx(expected, abs=3e-7)
+    got = mojospacy.cosine_similarity(first, second)
+    assert got == pytest.approx(expected, abs=3e-7)
+
+
+def test_cosine_similarity_has_no_parallel_threshold_hook():
+    assert not hasattr(vector_module, "_COSINE_PARALLEL_THRESHOLD")
+
+
+def test_most_similar_threaded_fan_out_is_bit_identical_to_serial(monkeypatch):
+    """Above the work threshold the shim blocks the query range over a pool;
+    each query owns one output row, so the result must not move at all."""
+    import mojospacy._lib as vector_lib
+
+    rng = np.random.default_rng(18)
+    data = np.ascontiguousarray(rng.normal(size=(4_000, 24)).astype(np.float32))
+    queries = np.ascontiguousarray(rng.normal(size=(64, 24)).astype(np.float32))
+    keys = [f"key-{row}" for row in range(len(data))]
+    vector_lib.MOST_SIMILAR_PARALLEL_THRESHOLD = 1
+    threaded = mojospacy.Vectors(data=data, keys=keys).most_similar(queries, n=5)
+    vector_lib.MOST_SIMILAR_PARALLEL_THRESHOLD = 1 << 62
+    serial = mojospacy.Vectors(data=data, keys=keys).most_similar(queries, n=5)
+    assert np.array_equal(threaded[1], serial[1])
+    assert np.array_equal(threaded[2], serial[2])
+    assert np.array_equal(threaded[0], serial[0])
 
 
 def test_add_find_and_properties_match_spacy():
@@ -95,7 +118,9 @@ def test_most_similar_simd_tails(dims):
 
 
 def test_most_similar_parallel_threshold(monkeypatch):
-    monkeypatch.setattr(vector_module, "_MOST_SIMILAR_PARALLEL_THRESHOLD", 1)
+    import mojospacy._lib as vector_lib
+
+    monkeypatch.setattr(vector_lib, "MOST_SIMILAR_PARALLEL_THRESHOLD", 1)
     rng = np.random.default_rng(18)
     data = rng.normal(size=(41, 9)).astype(np.float32)
     queries = rng.normal(size=(5, 9)).astype(np.float32)

@@ -336,7 +336,7 @@ def dot_f32(a: F32Ptr, b: F32Ptr, n: Int) -> Float32:
     var acc = SIMD[DType.float32, W](0.0)
     var i = 0
     while i + W <= n:
-        acc += a.load[width=W](i) * b.load[width=W](i)
+        acc += a.unsafe_load[width=W](i) * b.unsafe_load[width=W](i)
         i += W
     var result = acc.reduce_add()
     while i < n:
@@ -350,8 +350,8 @@ def dot_norm_f32(a: F32Ptr, b: F32Ptr, n: Int) -> DotNorm:
     var acc_norm = SIMD[DType.float32, W](0.0)
     var i = 0
     while i + W <= n:
-        var av = a.load[width=W](i)
-        var bv = b.load[width=W](i)
+        var av = a.unsafe_load[width=W](i)
+        var bv = b.unsafe_load[width=W](i)
         acc_dot += av * bv
         acc_norm += bv * bv
         i += W
@@ -371,8 +371,8 @@ def cosine_f32(a: F32Ptr, b: F32Ptr, begin: Int, end: Int) -> CosineSums:
     var acc_ab = SIMD[DType.float32, W](0.0)
     var i = begin
     while i + W <= end:
-        var av = a.load[width=W](i)
-        var bv = b.load[width=W](i)
+        var av = a.unsafe_load[width=W](i)
+        var bv = b.unsafe_load[width=W](i)
         acc_aa += av * av
         acc_bb += bv * bv
         acc_ab += av * bv
@@ -413,7 +413,7 @@ def msp_normalize(data_addr: Int, rows: Int, dims: Int) abi("C"):
         var wide_inv = SIMD[DType.float32, W](inv)
         var i = 0
         while i + W <= dims:
-            vector.store(i, vector.load[width=W](i) * wide_inv)
+            vector.store(i, vector.unsafe_load[width=W](i) * wide_inv)
             i += W
         while i < dims:
             vector[i] *= inv
